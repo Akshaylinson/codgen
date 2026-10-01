@@ -17,10 +17,11 @@ const BACKEND    = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000
 export default function StandaloneShell() {
   const [token,       setToken]       = useState(null);
   const [email,       setEmail]       = useState('');
+  const [credits,     setCredits]     = useState(null);
   const [activeTab,   setActiveTab]   = useState('image');
   const [showSettings,setShowSettings]= useState(false);
   const [hasMounted,  setHasMounted]  = useState(false);
-  const [authMode,    setAuthMode]    = useState('login'); // 'login' | 'register'
+  const [authMode,    setAuthMode]    = useState('login');
   const [formEmail,   setFormEmail]   = useState('');
   const [formPass,    setFormPass]    = useState('');
   const [authError,   setAuthError]   = useState('');
@@ -32,6 +33,15 @@ export default function StandaloneShell() {
     const e = localStorage.getItem(EMAIL_KEY);
     if (t) { setToken(t); setEmail(e || ''); }
   }, []);
+
+  // Fetch fresh credits whenever settings opens
+  useEffect(() => {
+    if (!showSettings || !token) return;
+    fetch(`${BACKEND}/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => { if (d.credits !== undefined) setCredits(d.credits); })
+      .catch(() => {});
+  }, [showSettings, token]);
 
   const handleAuth = useCallback(async (e) => {
     e.preventDefault();
@@ -49,6 +59,7 @@ export default function StandaloneShell() {
       localStorage.setItem(EMAIL_KEY, data.email);
       setToken(data.token);
       setEmail(data.email);
+      if (data.credits !== undefined) setCredits(data.credits);
     } catch (err) {
       setAuthError(err.message);
     } finally {
@@ -159,9 +170,14 @@ export default function StandaloneShell() {
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
           <div className="bg-[#111] border border-white/10 rounded-2xl p-8 w-full max-w-md">
             <h2 className="text-white font-bold text-xl mb-6">Settings</h2>
-            <p className="text-white/50 text-sm mb-6">
-              Signed in as <span className="text-white/80">{email}</span>
-            </p>
+            <p className="text-white/50 text-sm mb-1">Signed in as</p>
+            <p className="text-white/80 text-sm mb-4">{email}</p>
+            <div className="flex items-center justify-between bg-white/5 rounded-xl px-4 py-3 mb-6">
+              <span className="text-white/50 text-sm">Credits remaining</span>
+              <span className="text-[#d9ff00] font-black text-lg">
+                {credits === null ? '…' : credits}
+              </span>
+            </div>
             <div className="flex gap-3">
               <button
                 onClick={() => { handleLogout(); setShowSettings(false); }}
