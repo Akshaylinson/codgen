@@ -26,14 +26,14 @@ export function SettingsModal(onClose) {
     title.style.marginBottom = '1rem';
 
     const label = document.createElement('label');
-    label.textContent = 'Muapi API Key';
+    label.textContent = 'API Key';
     label.className = 'block text-sm text-secondary mb-2';
 
     const input = document.createElement('input');
     input.type = 'password';
     input.className = 'w-full mb-4 p-2 rounded bg-input border border-border-color';
-    input.value = localStorage.getItem('muapi_key') || '';
-    input.placeholder = 'Enter your Muapi API key...';
+    input.value = localStorage.getItem('codgen_key') || '';
+    input.placeholder = 'Enter your API key...';
     input.style.width = '100%';
     input.style.marginBottom = '1rem';
 
@@ -61,7 +61,7 @@ export function SettingsModal(onClose) {
     saveBtn.onclick = () => {
         const key = input.value.trim();
         if (key) {
-            localStorage.setItem('muapi_key', key);
+            localStorage.setItem('codgen_key', key);
             alert('API Key saved!');
             document.body.removeChild(overlay);
             if (onClose) onClose();
@@ -80,7 +80,6 @@ export function SettingsModal(onClose) {
 
     overlay.appendChild(modal);
 
-    // Close on outside click
     overlay.addEventListener('click', (e) => {
         if (e.target === overlay) {
             document.body.removeChild(overlay);

@@ -318,7 +318,7 @@ export function createUploadPicker({ anchorContainer, onSelect, onClear, maxImag
         const files = Array.from(e.target.files);
         if (!files.length) return;
 
-        const apiKey = localStorage.getItem('muapi_key');
+        const apiKey = localStorage.getItem('codgen_key');
         if (!apiKey) {
             AuthModal(() => fileInput.click());
             return;

@@ -858,7 +858,7 @@ export default function ImageStudio({ apiKey, onGenerationComplete, historyItems
                         title="Download"
                         onClick={(e) => {
                           e.stopPropagation();
-                          downloadImage(entry.url, `muapi-${entry.id || idx}.jpg`);
+                          downloadImage(entry.url, `codgen-${entry.id || idx}.jpg`);
                         }}
                         className="p-1.5 bg-primary rounded-lg text-black hover:scale-110 transition-transform"
                       >
@@ -896,7 +896,7 @@ export default function ImageStudio({ apiKey, onGenerationComplete, historyItems
               type="button"
               onClick={() => {
                 const entry = history[activeHistoryIdx];
-                downloadImage(currentImageUrl, `muapi-${entry?.id || "image"}.jpg`);
+                downloadImage(currentImageUrl, `codgen-${entry?.id || "image"}.jpg`);
               }}
               className="bg-primary text-black px-6 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-glow active:scale-95"
             >

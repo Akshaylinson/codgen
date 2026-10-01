@@ -7,7 +7,7 @@ export class MuapiClient {
     }
 
     getKey() {
-        const key = window.__MUAPI_KEY__ || localStorage.getItem('muapi_key');
+        const key = window.__CODGEN_KEY__ || localStorage.getItem('codgen_key');
         if (!key) throw new Error('API Key missing. Please set it in Settings.');
         return key;
     }
