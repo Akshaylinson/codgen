@@ -1,6 +1,7 @@
 import './style.css';
 import { Header } from './components/Header.js';
 import { ImageStudio } from './components/ImageStudio.js';
+import { AuthModal } from './components/AuthModal.js';
 
 const app = document.querySelector('#app');
 let contentArea;
@@ -27,25 +28,32 @@ function navigate(page) {
   }
 }
 
-app.innerHTML = '';
-// Pass navigate to Header so links work
-app.appendChild(Header(navigate));
+function boot() {
+  app.innerHTML = '';
+  app.appendChild(Header(navigate));
 
-contentArea = document.createElement('main');
-contentArea.id = 'content-area';
-contentArea.className = 'flex-1 relative w-full overflow-hidden flex flex-col bg-app-bg';
-app.appendChild(contentArea);
+  contentArea = document.createElement('main');
+  contentArea.id = 'content-area';
+  contentArea.className = 'flex-1 relative w-full overflow-hidden flex flex-col bg-app-bg';
+  app.appendChild(contentArea);
 
-// Initial Route
-navigate('image');
+  navigate('image');
 
-// Event Listener for Navigation
-window.addEventListener('navigate', (e) => {
-  if (e.detail.page === 'settings') {
-    import('./components/SettingsModal.js').then(({ SettingsModal }) => {
-      document.body.appendChild(SettingsModal());
-    });
-  } else {
-    navigate(e.detail.page);
-  }
-});
+  window.addEventListener('navigate', (e) => {
+    if (e.detail.page === 'settings') {
+      import('./components/SettingsModal.js').then(({ SettingsModal }) => {
+        document.body.appendChild(SettingsModal());
+      });
+    } else {
+      navigate(e.detail.page);
+    }
+  });
+}
+
+// Auth gate
+if (localStorage.getItem('codgen_token')) {
+  boot();
+} else {
+  AuthModal(boot);
+}
+

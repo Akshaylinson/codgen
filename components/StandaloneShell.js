@@ -10,28 +10,57 @@ const TABS = [
   { id: 'cinema',  label: 'Cinema Studio' },
 ];
 
-const STORAGE_KEY = 'codgen_key';
+const TOKEN_KEY  = 'codgen_token';
+const EMAIL_KEY  = 'codgen_email';
+const BACKEND    = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 export default function StandaloneShell() {
-  const [apiKey, setApiKey] = useState(null);
-  const [activeTab, setActiveTab] = useState('image');
-  const [showSettings, setShowSettings] = useState(false);
-  const [hasMounted, setHasMounted] = useState(false);
+  const [token,       setToken]       = useState(null);
+  const [email,       setEmail]       = useState('');
+  const [activeTab,   setActiveTab]   = useState('image');
+  const [showSettings,setShowSettings]= useState(false);
+  const [hasMounted,  setHasMounted]  = useState(false);
+  const [authMode,    setAuthMode]    = useState('login'); // 'login' | 'register'
+  const [formEmail,   setFormEmail]   = useState('');
+  const [formPass,    setFormPass]    = useState('');
+  const [authError,   setAuthError]   = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
   useEffect(() => {
     setHasMounted(true);
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) setApiKey(stored);
+    const t = localStorage.getItem(TOKEN_KEY);
+    const e = localStorage.getItem(EMAIL_KEY);
+    if (t) { setToken(t); setEmail(e || ''); }
   }, []);
 
-  const handleKeySave = useCallback((key) => {
-    localStorage.setItem(STORAGE_KEY, key);
-    setApiKey(key);
-  }, []);
+  const handleAuth = useCallback(async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthLoading(true);
+    try {
+      const res = await fetch(`${BACKEND}/auth/${authMode}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: formEmail.trim().toLowerCase(), password: formPass }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Authentication failed');
+      localStorage.setItem(TOKEN_KEY, data.token);
+      localStorage.setItem(EMAIL_KEY, data.email);
+      setToken(data.token);
+      setEmail(data.email);
+    } catch (err) {
+      setAuthError(err.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authMode, formEmail, formPass]);
 
-  const handleKeyChange = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY);
-    setApiKey(null);
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(EMAIL_KEY);
+    setToken(null);
+    setEmail('');
   }, []);
 
   if (!hasMounted) return (
@@ -40,7 +69,7 @@ export default function StandaloneShell() {
     </div>
   );
 
-  if (!apiKey) {
+  if (!token) {
     return (
       <div className="min-h-screen bg-[#050505] flex items-center justify-center px-4">
         <div className="w-full max-w-md bg-[#0a0a0a] border border-white/10 rounded-3xl p-8">
@@ -51,20 +80,45 @@ export default function StandaloneShell() {
               </svg>
             </div>
             <h1 className="text-2xl font-black text-white uppercase tracking-wider mb-2">Codgen</h1>
-            <p className="text-white/40 text-sm">Enter your API key to start generating</p>
+            <p className="text-white/40 text-sm">{authMode === 'login' ? 'Sign in to your account' : 'Create your account'}</p>
           </div>
-          <form onSubmit={(e) => { e.preventDefault(); const k = e.target.key.value.trim(); if (k) handleKeySave(k); }} className="space-y-4">
+
+          <form onSubmit={handleAuth} className="space-y-4">
             <input
-              name="key"
-              type="password"
-              placeholder="Enter your API key..."
+              type="email"
+              placeholder="Email"
+              value={formEmail}
+              onChange={e => setFormEmail(e.target.value)}
+              required
               className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none focus:border-[#d9ff00]/40 transition-colors"
-              suppressHydrationWarning
             />
-            <button type="submit" className="w-full bg-[#d9ff00] text-black font-black py-3 rounded-xl hover:opacity-90 transition-opacity">
-              Launch Studio
+            <input
+              type="password"
+              placeholder="Password"
+              value={formPass}
+              onChange={e => setFormPass(e.target.value)}
+              required
+              className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none focus:border-[#d9ff00]/40 transition-colors"
+            />
+            {authError && <p className="text-red-400 text-sm">{authError}</p>}
+            <button
+              type="submit"
+              disabled={authLoading}
+              className="w-full bg-[#d9ff00] text-black font-black py-3 rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {authLoading ? '...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
             </button>
           </form>
+
+          <p className="text-center text-white/30 text-sm mt-4">
+            {authMode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+            <button
+              onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(''); }}
+              className="text-[#d9ff00] hover:underline"
+            >
+              {authMode === 'login' ? 'Register' : 'Sign In'}
+            </button>
+          </p>
         </div>
       </div>
     );
@@ -72,22 +126,16 @@ export default function StandaloneShell() {
 
   return (
     <div className="h-screen bg-[#050505] flex flex-col overflow-hidden">
-      {/* Header */}
       <header className="flex-shrink-0 flex items-center justify-between px-4 pt-4 pb-0 border-b border-white/5">
-        <div className="flex items-center gap-3">
-          <span className="text-white font-black text-lg tracking-wider uppercase">Codgen</span>
-        </div>
+        <span className="text-white font-black text-lg tracking-wider uppercase">Codgen</span>
 
-        {/* Tabs */}
         <nav className="flex items-center gap-1">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-                activeTab === tab.id
-                  ? 'bg-[#d9ff00] text-black'
-                  : 'text-white/50 hover:text-white'
+                activeTab === tab.id ? 'bg-[#d9ff00] text-black' : 'text-white/50 hover:text-white'
               }`}
             >
               {tab.label}
@@ -95,37 +143,31 @@ export default function StandaloneShell() {
           ))}
         </nav>
 
-        {/* Settings */}
-        <button
-          onClick={() => setShowSettings(true)}
-          className="text-white/40 hover:text-white text-sm transition-colors"
-        >
+        <button onClick={() => setShowSettings(true)} className="text-white/40 hover:text-white text-sm transition-colors">
           ⚙ Settings
         </button>
       </header>
 
-      {/* Studio Content */}
       <div className="flex-1">
-        {activeTab === 'image'   && <ImageStudio   apiKey={apiKey} />}
-        {activeTab === 'video'   && <VideoStudio   apiKey={apiKey} />}
-        {activeTab === 'lipsync' && <LipSyncStudio apiKey={apiKey} />}
-        {activeTab === 'cinema'  && <CinemaStudio  apiKey={apiKey} />}
+        {activeTab === 'image'   && <ImageStudio   apiKey={token} />}
+        {activeTab === 'video'   && <VideoStudio   apiKey={token} />}
+        {activeTab === 'lipsync' && <LipSyncStudio apiKey={token} />}
+        {activeTab === 'cinema'  && <CinemaStudio  apiKey={token} />}
       </div>
 
-      {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
           <div className="bg-[#111] border border-white/10 rounded-2xl p-8 w-full max-w-md">
             <h2 className="text-white font-bold text-xl mb-6">Settings</h2>
-            <p className="text-white/50 text-sm mb-4">
-              Current key: <span className="text-white/80 font-mono">{apiKey.slice(0, 8)}••••••••</span>
+            <p className="text-white/50 text-sm mb-6">
+              Signed in as <span className="text-white/80">{email}</span>
             </p>
             <div className="flex gap-3">
               <button
-                onClick={handleKeyChange}
+                onClick={() => { handleLogout(); setShowSettings(false); }}
                 className="flex-1 py-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 text-sm transition-colors"
               >
-                Change API Key
+                Sign Out
               </button>
               <button
                 onClick={() => setShowSettings(false)}

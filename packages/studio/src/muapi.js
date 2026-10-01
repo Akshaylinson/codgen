@@ -1,14 +1,29 @@
 import { getModelById, getVideoModelById, getI2IModelById, getI2VModelById, getV2VModelById, getLipSyncModelById } from './models.js';
 
-const BASE_URL = 'https://api.muapi.ai';
+// Phase 2: points to Codgen proxy backend — Muapi key never reaches the browser
+const BASE_URL = typeof window !== 'undefined'
+    ? (window.__CODGEN_BACKEND_URL__ || process.env.NEXT_PUBLIC_BACKEND_URL || '')
+    : (process.env.NEXT_PUBLIC_BACKEND_URL || '');
 
-async function pollForResult(requestId, key, maxAttempts = 900, interval = 2000) {
+function authHeaders(token) {
+    return {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+    };
+}
+
+function getToken() {
+    if (typeof window === 'undefined') return null;
+    return window.__CODGEN_TOKEN__ || localStorage.getItem('codgen_token');
+}
+
+async function pollForResult(requestId, token, maxAttempts = 900, interval = 2000) {
     const pollUrl = `${BASE_URL}/api/v1/predictions/${requestId}/result`;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         await new Promise(resolve => setTimeout(resolve, interval));
         try {
             const response = await fetch(pollUrl, {
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key }
+                headers: authHeaders(token),
             });
             if (!response.ok) {
                 const errText = await response.text();
@@ -26,12 +41,12 @@ async function pollForResult(requestId, key, maxAttempts = 900, interval = 2000)
     throw new Error('Generation timed out after polling.');
 }
 
-async function submitAndPoll(endpoint, payload, key, onRequestId, maxAttempts = 60) {
+async function submitAndPoll(endpoint, payload, token, onRequestId, maxAttempts = 60) {
     const url = `${BASE_URL}/api/v1/${endpoint}`;
     const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': key },
-        body: JSON.stringify(payload)
+        headers: authHeaders(token),
+        body: JSON.stringify(payload),
     });
     if (!response.ok) {
         const errText = await response.text();
@@ -41,12 +56,13 @@ async function submitAndPoll(endpoint, payload, key, onRequestId, maxAttempts = 
     const requestId = submitData.request_id || submitData.id;
     if (!requestId) return submitData;
     if (onRequestId) onRequestId(requestId);
-    const result = await pollForResult(requestId, key, maxAttempts);
+    const result = await pollForResult(requestId, token, maxAttempts);
     const outputUrl = result.outputs?.[0] || result.url || result.output?.url;
     return { ...result, url: outputUrl };
 }
 
 export async function generateImage(apiKey, params) {
+    const token = getToken() || apiKey;
     const modelInfo = getModelById(params.model);
     const endpoint = modelInfo?.endpoint || params.model;
     const payload = { prompt: params.prompt };
@@ -56,10 +72,11 @@ export async function generateImage(apiKey, params) {
     if (params.image_url) { payload.image_url = params.image_url; payload.strength = params.strength || 0.6; }
     else payload.image_url = null;
     if (params.seed && params.seed !== -1) payload.seed = params.seed;
-    return submitAndPoll(endpoint, payload, apiKey, params.onRequestId, 60);
+    return submitAndPoll(endpoint, payload, token, params.onRequestId, 60);
 }
 
 export async function generateI2I(apiKey, params) {
+    const token = getToken() || apiKey;
     const modelInfo = getI2IModelById(params.model);
     const endpoint = modelInfo?.endpoint || params.model;
     const payload = {};
@@ -73,10 +90,11 @@ export async function generateI2I(apiKey, params) {
     if (params.aspect_ratio) payload.aspect_ratio = params.aspect_ratio;
     if (params.resolution) payload.resolution = params.resolution;
     if (params.quality) payload.quality = params.quality;
-    return submitAndPoll(endpoint, payload, apiKey, params.onRequestId, 60);
+    return submitAndPoll(endpoint, payload, token, params.onRequestId, 60);
 }
 
 export async function generateVideo(apiKey, params) {
+    const token = getToken() || apiKey;
     const modelInfo = getVideoModelById(params.model);
     const endpoint = modelInfo?.endpoint || params.model;
     const payload = {};
@@ -87,10 +105,11 @@ export async function generateVideo(apiKey, params) {
     if (params.quality) payload.quality = params.quality;
     if (params.mode) payload.mode = params.mode;
     if (params.image_url) payload.image_url = params.image_url;
-    return submitAndPoll(endpoint, payload, apiKey, params.onRequestId, 900);
+    return submitAndPoll(endpoint, payload, token, params.onRequestId, 900);
 }
 
 export async function generateI2V(apiKey, params) {
+    const token = getToken() || apiKey;
     const modelInfo = getI2VModelById(params.model);
     const endpoint = modelInfo?.endpoint || params.model;
     const payload = {};
@@ -105,10 +124,11 @@ export async function generateI2V(apiKey, params) {
     if (params.resolution) payload.resolution = params.resolution;
     if (params.quality) payload.quality = params.quality;
     if (params.mode) payload.mode = params.mode;
-    return submitAndPoll(endpoint, payload, apiKey, params.onRequestId, 900);
+    return submitAndPoll(endpoint, payload, token, params.onRequestId, 900);
 }
 
 export async function processLipSync(apiKey, params) {
+    const token = getToken() || apiKey;
     const modelInfo = getLipSyncModelById(params.model);
     const endpoint = modelInfo?.endpoint || params.model;
     const payload = {};
@@ -118,24 +138,24 @@ export async function processLipSync(apiKey, params) {
     if (params.prompt) payload.prompt = params.prompt;
     if (params.resolution) payload.resolution = params.resolution;
     if (params.seed !== undefined && params.seed !== -1) payload.seed = params.seed;
-    return submitAndPoll(endpoint, payload, apiKey, params.onRequestId, 900);
+    return submitAndPoll(endpoint, payload, token, params.onRequestId, 900);
 }
 
 export function uploadFile(apiKey, file, onProgress) {
     return new Promise((resolve, reject) => {
+        const token = getToken() || apiKey;
         const url = `${BASE_URL}/api/v1/upload_file`;
         const formData = new FormData();
         formData.append('file', file);
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', url);
-        xhr.setRequestHeader('x-api-key', apiKey);
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
         if (onProgress) {
             xhr.upload.onprogress = (event) => {
                 if (event.lengthComputable) {
-                    const percentComplete = Math.round((event.loaded / event.total) * 100);
-                    onProgress(percentComplete);
+                    onProgress(Math.round((event.loaded / event.total) * 100));
                 }
             };
         }
@@ -145,22 +165,14 @@ export function uploadFile(apiKey, file, onProgress) {
                 try {
                     const data = JSON.parse(xhr.responseText);
                     const fileUrl = data.url || data.file_url || data.data?.url;
-                    if (!fileUrl) {
-                        reject(new Error('No URL returned from file upload'));
-                    } else {
-                        resolve(fileUrl);
-                    }
+                    if (!fileUrl) reject(new Error('No URL returned from file upload'));
+                    else resolve(fileUrl);
                 } catch (e) {
                     reject(new Error('Failed to parse upload response'));
                 }
             } else {
                 let detail = xhr.statusText;
-                try {
-                    const errObj = JSON.parse(xhr.responseText);
-                    detail = errObj.detail || detail;
-                } catch (e) {
-                    // fallback to statusText
-                }
+                try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
                 reject(new Error(`File upload failed: ${xhr.status} - ${detail}`));
             }
         };
@@ -169,4 +181,3 @@ export function uploadFile(apiKey, file, onProgress) {
         xhr.send(formData);
     });
 }
-

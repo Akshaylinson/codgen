@@ -959,7 +959,7 @@ export function ImageStudio() {
         const pending = getPendingJobs('image');
         if (!pending.length) return;
 
-        const apiKey = localStorage.getItem('codgen_key');
+        const apiKey = localStorage.getItem('codgen_token');
         if (!apiKey) return; // can't poll without key; jobs remain for next time
 
         const banner = document.createElement('div');
@@ -1045,7 +1045,7 @@ export function ImageStudio() {
             }
         }
 
-        const apiKey = localStorage.getItem('codgen_key');
+        const apiKey = localStorage.getItem('codgen_token');
         if (!apiKey) {
             AuthModal(() => generateBtn.click());
             return;

@@ -2,14 +2,18 @@ import { getModelById, getVideoModelById, getI2IModelById, getI2VModelById, getV
 
 export class CodgenClient {
     constructor() {
-        // Ideally user provides this in settings
-        this.baseUrl = import.meta.env.DEV ? '' : 'https://api.muapi.ai';
+        // Phase 2: points to Codgen proxy backend — Muapi key never reaches the browser
+        this.baseUrl = window.__CODGEN_BACKEND_URL__ || import.meta.env.VITE_BACKEND_URL || '';
     }
 
-    getKey() {
-        const key = window.__CODGEN_KEY__ || localStorage.getItem('codgen_key');
-        if (!key) throw new Error('API Key missing. Please set it in Settings.');
-        return key;
+    getToken() {
+        const token = window.__CODGEN_TOKEN__ || localStorage.getItem('codgen_token');
+        if (!token) throw new Error('Not authenticated. Please log in.');
+        return token;
+    }
+
+    authHeaders() {
+        return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.getToken()}` };
     }
 
     /**
@@ -25,7 +29,6 @@ export class CodgenClient {
      * @param {string} [params.image_url] - If present, treats as Image-to-Image
      */
     async generateImage(params) {
-        const key = this.getKey();
 
         // Resolve endpoint from model definition
         const modelInfo = getModelById(params.model);
@@ -69,46 +72,29 @@ export class CodgenClient {
         console.log('[Codgen] Payload:', finalPayload);
 
         try {
-            // Step 1: Submit the task
             const response = await fetch(url, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-key': key
-                },
+                headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
             });
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error('[Codgen] API Error Body:', errText);
                 throw new Error(`API Request Failed: ${response.status} ${response.statusText} - ${errText.slice(0, 100)}`);
             }
 
             const submitData = await response.json();
-            console.log('[Codgen] Submit Response:', submitData);
-
-            // Extract request_id for polling
             const requestId = submitData.request_id || submitData.id;
-            if (!requestId) {
-                // Some endpoints return the result directly
-                return submitData;
-            }
+            if (!requestId) return submitData;
 
-            // Notify caller of requestId so they can persist it before polling begins
             if (params.onRequestId) params.onRequestId(requestId);
 
-            // Step 2: Poll for results
-            console.log('[Codgen] Polling for results, request_id:', requestId);
-            const result = await this.pollForResult(requestId, key);
-
-            // Normalize: extract image URL from outputs array
+            const result = await this.pollForResult(requestId);
             const imageUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Codgen] Image URL:', imageUrl);
             return { ...result, url: imageUrl };
 
         } catch (error) {
-            console.error("Codgen Client Error:", error);
+            console.error('[Codgen] generateImage error:', error);
             throw error;
         }
     }
@@ -120,48 +106,27 @@ export class CodgenClient {
      * @param {number} maxAttempts - Maximum polling attempts (default 60 = ~2 min)
      * @param {number} interval - Polling interval in ms (default 2000)
      */
-    async pollForResult(requestId, key, maxAttempts = 60, interval = 2000) {
+    async pollForResult(requestId, _unused, maxAttempts = 60, interval = 2000) {
         const pollUrl = `${this.baseUrl}/api/v1/predictions/${requestId}/result`;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             await new Promise(resolve => setTimeout(resolve, interval));
-
-            console.log(`[Codgen] Polling attempt ${attempt}/${maxAttempts}...`);
-
             try {
-                const response = await fetch(pollUrl, {
-                    method: 'GET',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-api-key': key
-                    }
-                });
+                const response = await fetch(pollUrl, { headers: this.authHeaders() });
 
                 if (!response.ok) {
                     const errText = await response.text();
-                    console.warn(`[Codgen] Poll error (${response.status}):`, errText);
-                    // Continue polling on non-fatal errors
                     if (response.status >= 500) continue;
                     throw new Error(`Poll Failed: ${response.status} - ${errText.slice(0, 100)}`);
                 }
 
                 const data = await response.json();
-                console.log('[Codgen] Poll Response:', data);
-
                 const status = data.status?.toLowerCase();
 
-                if (status === 'completed' || status === 'succeeded' || status === 'success') {
-                    return data;
-                }
-
-                if (status === 'failed' || status === 'error') {
-                    throw new Error(`Generation failed: ${data.error || 'Unknown error'}`);
-                }
-
-                // Otherwise (processing, pending, etc.) keep polling
+                if (status === 'completed' || status === 'succeeded' || status === 'success') return data;
+                if (status === 'failed' || status === 'error') throw new Error(`Generation failed: ${data.error || 'Unknown error'}`);
             } catch (error) {
                 if (attempt === maxAttempts) throw error;
-                console.warn('[Codgen] Poll attempt failed, retrying...', error.message);
             }
         }
 
@@ -169,7 +134,6 @@ export class CodgenClient {
     }
 
     async generateVideo(params) {
-        const key = this.getKey();
 
         const modelInfo = getVideoModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
@@ -192,36 +156,27 @@ export class CodgenClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-key': key
-                },
+                headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
             });
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error('[Codgen] API Error Body:', errText);
                 throw new Error(`API Request Failed: ${response.status} ${response.statusText} - ${errText.slice(0, 100)}`);
             }
 
             const submitData = await response.json();
-            console.log('[Codgen] Video Submit Response:', submitData);
-
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            console.log('[Codgen] Polling for video results, request_id:', requestId);
-            const result = await this.pollForResult(requestId, key, 900, 2000);
-
+            const result = await this.pollForResult(requestId, null, 900, 2000);
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Codgen] Video URL:', videoUrl);
             return { ...result, url: videoUrl };
 
         } catch (error) {
-            console.error("Codgen Video Client Error:", error);
+            console.error('[Codgen] generateVideo error:', error);
             throw error;
         }
     }
@@ -237,7 +192,6 @@ export class CodgenClient {
      * @param {string} [params.resolution]
      */
     async generateI2I(params) {
-        const key = this.getKey();
         const modelInfo = getI2IModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
         const url = `${this.baseUrl}/api/v1/${endpoint}`;
@@ -268,7 +222,7 @@ export class CodgenClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
             });
 
@@ -278,19 +232,16 @@ export class CodgenClient {
             }
 
             const submitData = await response.json();
-            console.log('[Codgen] I2I Submit Response:', submitData);
-
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key);
+            const result = await this.pollForResult(requestId);
             const imageUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Codgen] I2I Result URL:', imageUrl);
             return { ...result, url: imageUrl };
         } catch (error) {
-            console.error('Codgen I2I Error:', error);
+            console.error('[Codgen] generateI2I error:', error);
             throw error;
         }
     }
@@ -307,7 +258,6 @@ export class CodgenClient {
      * @param {string} [params.quality]
      */
     async generateI2V(params) {
-        const key = this.getKey();
         const modelInfo = getI2VModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
         const url = `${this.baseUrl}/api/v1/${endpoint}`;
@@ -338,7 +288,7 @@ export class CodgenClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
             });
 
@@ -348,19 +298,16 @@ export class CodgenClient {
             }
 
             const submitData = await response.json();
-            console.log('[Codgen] I2V Submit Response:', submitData);
-
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000);
+            const result = await this.pollForResult(requestId, null, 900, 2000);
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Codgen] I2V Result URL:', videoUrl);
             return { ...result, url: videoUrl };
         } catch (error) {
-            console.error('Codgen I2V Error:', error);
+            console.error('[Codgen] generateI2V error:', error);
             throw error;
         }
     }
@@ -371,17 +318,13 @@ export class CodgenClient {
      * @returns {Promise<string>} The hosted URL of the uploaded file
      */
     async uploadFile(file) {
-        const key = this.getKey();
         const url = `${this.baseUrl}/api/v1/upload_file`;
-
         const formData = new FormData();
         formData.append('file', file);
 
-        console.log('[Codgen] Uploading file:', file.name);
-
         const response = await fetch(url, {
             method: 'POST',
-            headers: { 'x-api-key': key },
+            headers: { 'Authorization': `Bearer ${this.getToken()}` },
             body: formData
         });
 
@@ -391,8 +334,6 @@ export class CodgenClient {
         }
 
         const data = await response.json();
-        console.log('[Codgen] Upload response:', data);
-
         const fileUrl = data.url || data.file_url || data.data?.url;
         if (!fileUrl) throw new Error('No URL returned from file upload');
         return fileUrl;
@@ -405,7 +346,6 @@ export class CodgenClient {
      * @param {string} params.video_url - The uploaded video URL
      */
     async processV2V(params) {
-        const key = this.getKey();
         const modelInfo = getV2VModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
         const url = `${this.baseUrl}/api/v1/${endpoint}`;
@@ -419,7 +359,7 @@ export class CodgenClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
             });
 
@@ -429,19 +369,16 @@ export class CodgenClient {
             }
 
             const submitData = await response.json();
-            console.log('[Codgen] V2V Submit Response:', submitData);
-
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000);
+            const result = await this.pollForResult(requestId, null, 900, 2000);
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Codgen] V2V Result URL:', videoUrl);
             return { ...result, url: videoUrl };
         } catch (error) {
-            console.error('Codgen V2V Error:', error);
+            console.error('[Codgen] processV2V error:', error);
             throw error;
         }
     }
@@ -460,7 +397,6 @@ export class CodgenClient {
      * @param {Function} [params.onRequestId] - Called when request_id is received
      */
     async processLipSync(params) {
-        const key = this.getKey();
         const modelInfo = getLipSyncModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
         const url = `${this.baseUrl}/api/v1/${endpoint}`;
@@ -480,30 +416,26 @@ export class CodgenClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
             });
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error('[Codgen] LipSync API Error:', errText);
                 throw new Error(`API Request Failed: ${response.status} ${response.statusText} - ${errText.slice(0, 100)}`);
             }
 
             const submitData = await response.json();
-            console.log('[Codgen] LipSync Submit Response:', submitData);
-
             const requestId = submitData.request_id || submitData.id;
             if (!requestId) return submitData;
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000);
+            const result = await this.pollForResult(requestId, null, 900, 2000);
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
-            console.log('[Codgen] LipSync Result URL:', videoUrl);
             return { ...result, url: videoUrl };
         } catch (error) {
-            console.error('Codgen LipSync Error:', error);
+            console.error('[Codgen] processLipSync error:', error);
             throw error;
         }
     }
@@ -522,4 +454,6 @@ export class CodgenClient {
     }
 }
 
-export const muapi = new CodgenClient();
+export const codgen = new CodgenClient();
+// backward-compat alias
+export const muapi = codgen;
