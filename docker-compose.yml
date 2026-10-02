@@ -26,7 +26,6 @@ services:
       - ./backend/.env
     environment:
       DATABASE_URL: postgresql://codgen:${POSTGRES_PASSWORD:-codgen_secret}@db:5432/codgen
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
     ports:
       - "8000:8000"
 
