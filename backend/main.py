@@ -1,22 +1,25 @@
 """
-Codgen Proxy Backend — Phase 4
-- Refresh tokens (15-min access + 30-day refresh, rotation on every use)
-- Password reset via email (/auth/forgot-password → /auth/reset-password)
-- Admin panel (/admin/users, /admin/users/{id}/credits)
-- Stripe credit top-up (/billing/checkout, /billing/webhook)
-- Rate limiting via slowapi
+Codgen Proxy Backend — Phase 5
+- Email verification (send on register, block unverified on proxy)
+- OAuth (Google / GitHub via Authlib)
+- Usage analytics (per-model generation counts)
+- Team/org accounts (shared credit pools, invite members)
+- Webhook notifications (notify users when jobs complete)
 """
 
 import os
 import json
+import hmac
+import hashlib
+import secrets
 import datetime
 import httpx
 import bcrypt
 import stripe
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException, Depends, Query
+from fastapi import FastAPI, Request, HTTPException, Depends, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -24,9 +27,14 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 from dotenv import load_dotenv
+from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from database import get_db, init_db
-from models import User, Generation, RefreshToken, PasswordResetToken
+from models import (
+    User, Generation, RefreshToken, PasswordResetToken,
+    EmailVerification, OAuthAccount, Team, TeamMembership, TeamInvite,
+    WebhookSubscription,
+)
 from storage import upload_to_storage, storage_enabled
 from auth import (
     make_access_token,
@@ -34,7 +42,7 @@ from auth import (
     refresh_token_expiry,
     decode_access_token,
 )
-from email import send_password_reset
+from email import send_password_reset, send_verification_email, send_team_invite
 
 load_dotenv()
 
@@ -43,10 +51,18 @@ MUAPI_BASE      = "https://api.muapi.ai"
 DEFAULT_CREDITS = int(os.environ.get("DEFAULT_CREDITS", "100"))
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 FRONTEND_URL    = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+BACKEND_URL     = os.environ.get("BACKEND_URL", "http://localhost:8000")
+REQUIRE_EMAIL_VERIFICATION = os.environ.get("REQUIRE_EMAIL_VERIFICATION", "false").lower() == "true"
 
 stripe.api_key              = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET       = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID             = os.environ.get("STRIPE_PRICE_ID", "")   # price_xxx for 100 credits
+
+# OAuth
+GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GITHUB_CLIENT_ID     = os.environ.get("GITHUB_CLIENT_ID", "")
+GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_CLIENT_SECRET", "")
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
@@ -103,6 +119,7 @@ def _token_response(user: User, refresh_value: str) -> dict:
         "token_type":    "bearer",
         "email":         user.email,
         "credits":       user.credits,
+        "is_verified":   user.is_verified,
     }
 
 
@@ -131,7 +148,16 @@ async def register(request: Request, db: AsyncSession = Depends(get_db)):
 
     rv = make_refresh_token_value()
     db.add(RefreshToken(user_id=user.id, token=rv, expires_at=refresh_token_expiry()))
+
+    # Send verification email
+    ev_token = secrets.token_urlsafe(32)
+    db.add(EmailVerification(
+        user_id    = user.id,
+        token      = ev_token,
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=24),
+    ))
     await db.commit()
+    send_verification_email(email, ev_token)
 
     return _token_response(user, rv)
 
@@ -212,7 +238,7 @@ async def logout(request: Request, db: AsyncSession = Depends(get_db)):
 
 @app.get("/auth/me")
 async def me(user: User = Depends(get_current_user)):
-    return {"email": user.email, "credits": user.credits, "id": user.id, "is_admin": user.is_admin}
+    return {"email": user.email, "credits": user.credits, "id": user.id, "is_admin": user.is_admin, "is_verified": user.is_verified}
 
 
 # ── Password reset: request ───────────────────────────────────────────────────
@@ -440,13 +466,17 @@ async def get_history(
 @app.post("/api/v1/{endpoint:path}")
 @limiter.limit("60/minute")
 async def proxy_post(
-    endpoint: str,
-    request:  Request,
-    user:     User = Depends(get_current_user),
-    db:       AsyncSession = Depends(get_db),
+    endpoint:         str,
+    request:          Request,
+    background_tasks: BackgroundTasks,
+    user:             User = Depends(get_current_user),
+    db:               AsyncSession = Depends(get_db),
 ):
     if user.credits <= 0:
         raise HTTPException(status_code=429, detail="Credit quota exhausted. Top up to continue.")
+
+    if REQUIRE_EMAIL_VERIFICATION and not user.is_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email before generating.")
 
     content_type = request.headers.get("content-type", "")
     upstream_url = f"{MUAPI_BASE}/api/v1/{endpoint}"
@@ -489,14 +519,21 @@ async def proxy_post(
 
     if resp.status_code < 300 and "predictions" not in endpoint:
         user.credits = max(0, user.credits - 1)
-        db.add(Generation(
+        gen = Generation(
             user_id    = user.id,
             studio     = _infer_studio(endpoint),
             model      = endpoint,
             prompt     = body_json.get("prompt"),
             output_url = (resp_data.get("outputs") or [None])[0] or resp_data.get("url"),
-        ))
+        )
+        db.add(gen)
         await db.commit()
+        background_tasks.add_task(_fire_webhooks, user.id, {
+            "event":      "generation.completed",
+            "studio":     gen.studio,
+            "model":      gen.model,
+            "output_url": gen.output_url,
+        }, db)
 
     return JSONResponse(content=resp_data, status_code=resp.status_code)
 
@@ -517,6 +554,369 @@ async def proxy_get(
             params=dict(request.query_params),
         )
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+
+# ── Phase 5: Email verification ──────────────────────────────────────────────
+
+@app.get("/auth/verify-email")
+async def verify_email(token: str = Query(...), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EmailVerification).where(EmailVerification.token == token))
+    ev = result.scalar_one_or_none()
+    if not ev or ev.used or ev.expires_at < datetime.datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Invalid or expired verification link")
+    ev.used = True
+    user_result = await db.execute(select(User).where(User.id == ev.user_id))
+    user = user_result.scalar_one_or_none()
+    if user:
+        user.is_verified = True
+    await db.commit()
+    return RedirectResponse(url=f"{FRONTEND_URL}/?verified=1")
+
+
+@app.post("/auth/resend-verification")
+@limiter.limit("3/minute")
+async def resend_verification(request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if user.is_verified:
+        return {"ok": True, "message": "Already verified"}
+    ev_token = secrets.token_urlsafe(32)
+    db.add(EmailVerification(
+        user_id    = user.id,
+        token      = ev_token,
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=24),
+    ))
+    await db.commit()
+    send_verification_email(user.email, ev_token)
+    return {"ok": True, "message": "Verification email sent"}
+
+
+# ── Phase 5: OAuth ────────────────────────────────────────────────────────────
+
+async def _oauth_get_or_create_user(provider: str, provider_user_id: str, email: str, db: AsyncSession):
+    """Find existing OAuth account or create new user + link."""
+    result = await db.execute(
+        select(OAuthAccount).where(
+            OAuthAccount.provider == provider,
+            OAuthAccount.provider_user_id == provider_user_id,
+        )
+    )
+    oa = result.scalar_one_or_none()
+    if oa:
+        user_result = await db.execute(select(User).where(User.id == oa.user_id))
+        return user_result.scalar_one()
+
+    # Check if email already registered
+    user_result = await db.execute(select(User).where(User.email == email))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        user = User(email=email, hashed_password=None, credits=DEFAULT_CREDITS, is_verified=True)
+        db.add(user)
+        await db.flush()
+    db.add(OAuthAccount(user_id=user.id, provider=provider, provider_user_id=str(provider_user_id)))
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+@app.get("/auth/oauth/google")
+async def oauth_google_redirect():
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google OAuth not configured")
+    redirect_uri = f"{BACKEND_URL}/auth/oauth/google/callback"
+    client = AsyncOAuth2Client(client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET, redirect_uri=redirect_uri)
+    uri, state = client.create_authorization_url("https://accounts.google.com/o/oauth2/v2/auth", scope="openid email profile")
+    return RedirectResponse(url=uri)
+
+
+@app.get("/auth/oauth/google/callback")
+async def oauth_google_callback(request: Request, db: AsyncSession = Depends(get_db)):
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google OAuth not configured")
+    redirect_uri = f"{BACKEND_URL}/auth/oauth/google/callback"
+    client = AsyncOAuth2Client(client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET, redirect_uri=redirect_uri)
+    token = await client.fetch_token("https://oauth2.googleapis.com/token", authorization_response=str(request.url))
+    userinfo = await client.get("https://www.googleapis.com/oauth2/v3/userinfo")
+    info = userinfo.json()
+    user = await _oauth_get_or_create_user("google", info["sub"], info["email"], db)
+    rv = make_refresh_token_value()
+    db.add(RefreshToken(user_id=user.id, token=rv, expires_at=refresh_token_expiry()))
+    await db.commit()
+    resp = _token_response(user, rv)
+    return RedirectResponse(url=f"{FRONTEND_URL}/?access_token={resp['access_token']}&refresh_token={rv}")
+
+
+@app.get("/auth/oauth/github")
+async def oauth_github_redirect():
+    if not GITHUB_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+    redirect_uri = f"{BACKEND_URL}/auth/oauth/github/callback"
+    client = AsyncOAuth2Client(client_id=GITHUB_CLIENT_ID, client_secret=GITHUB_CLIENT_SECRET, redirect_uri=redirect_uri)
+    uri, state = client.create_authorization_url("https://github.com/login/oauth/authorize", scope="user:email")
+    return RedirectResponse(url=uri)
+
+
+@app.get("/auth/oauth/github/callback")
+async def oauth_github_callback(request: Request, db: AsyncSession = Depends(get_db)):
+    if not GITHUB_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+    redirect_uri = f"{BACKEND_URL}/auth/oauth/github/callback"
+    client = AsyncOAuth2Client(client_id=GITHUB_CLIENT_ID, client_secret=GITHUB_CLIENT_SECRET, redirect_uri=redirect_uri)
+    await client.fetch_token("https://github.com/login/oauth/access_token", authorization_response=str(request.url))
+    gh_user = (await client.get("https://api.github.com/user")).json()
+    emails  = (await client.get("https://api.github.com/user/emails")).json()
+    primary = next((e["email"] for e in emails if e.get("primary") and e.get("verified")), gh_user.get("email", ""))
+    user = await _oauth_get_or_create_user("github", str(gh_user["id"]), primary, db)
+    rv = make_refresh_token_value()
+    db.add(RefreshToken(user_id=user.id, token=rv, expires_at=refresh_token_expiry()))
+    await db.commit()
+    resp = _token_response(user, rv)
+    return RedirectResponse(url=f"{FRONTEND_URL}/?access_token={resp['access_token']}&refresh_token={rv}")
+
+
+# ── Phase 5: Usage analytics ──────────────────────────────────────────────────
+
+@app.get("/analytics/usage")
+async def usage_analytics(
+    days:   int = Query(30, le=365),
+    studio: str | None = Query(None),
+    user:   User = Depends(get_current_user),
+    db:     AsyncSession = Depends(get_db),
+):
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    q = select(Generation.model, Generation.studio, func.count(Generation.id).label("count")) \
+        .where(Generation.user_id == user.id, Generation.created_at >= since)
+    if studio:
+        q = q.where(Generation.studio == studio)
+    q = q.group_by(Generation.model, Generation.studio).order_by(desc("count"))
+    rows = (await db.execute(q)).all()
+    return {"days": days, "by_model": [{"model": r.model, "studio": r.studio, "count": r.count} for r in rows]}
+
+
+@app.get("/analytics/daily")
+async def daily_analytics(
+    days: int = Query(30, le=365),
+    user: User = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    q = select(
+        func.date(Generation.created_at).label("date"),
+        func.count(Generation.id).label("count"),
+    ).where(Generation.user_id == user.id, Generation.created_at >= since) \
+     .group_by(func.date(Generation.created_at)) \
+     .order_by("date")
+    rows = (await db.execute(q)).all()
+    return {"days": days, "daily": [{"date": str(r.date), "count": r.count} for r in rows]}
+
+
+@app.get("/admin/analytics")
+async def admin_analytics(
+    days:  int = Query(30, le=365),
+    admin: User = Depends(get_admin_user),
+    db:    AsyncSession = Depends(get_db),
+):
+    since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    total_gens = (await db.execute(
+        select(func.count(Generation.id)).where(Generation.created_at >= since)
+    )).scalar()
+    total_users = (await db.execute(select(func.count(User.id)))).scalar()
+    by_model = (await db.execute(
+        select(Generation.model, func.count(Generation.id).label("count"))
+        .where(Generation.created_at >= since)
+        .group_by(Generation.model)
+        .order_by(desc("count"))
+        .limit(20)
+    )).all()
+    return {
+        "days": days,
+        "total_generations": total_gens,
+        "total_users": total_users,
+        "top_models": [{"model": r.model, "count": r.count} for r in by_model],
+    }
+
+
+# ── Phase 5: Teams ────────────────────────────────────────────────────────────
+
+@app.post("/teams")
+async def create_team(request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Team name required")
+    team = Team(name=name, owner_id=user.id)
+    db.add(team)
+    await db.flush()
+    db.add(TeamMembership(team_id=team.id, user_id=user.id, role="owner"))
+    await db.commit()
+    await db.refresh(team)
+    return {"id": team.id, "name": team.name, "credits": team.credits}
+
+
+@app.get("/teams")
+async def list_teams(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Team).join(TeamMembership, TeamMembership.team_id == Team.id)
+        .where(TeamMembership.user_id == user.id)
+    )
+    teams = result.scalars().all()
+    return [{"id": t.id, "name": t.name, "credits": t.credits, "owner_id": t.owner_id} for t in teams]
+
+
+@app.get("/teams/{team_id}")
+async def get_team(team_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await _require_team_member(team_id, user.id, db)
+    result = await db.execute(select(Team).where(Team.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    members_result = await db.execute(
+        select(TeamMembership, User).join(User, User.id == TeamMembership.user_id)
+        .where(TeamMembership.team_id == team_id)
+    )
+    members = [{"user_id": m.user_id, "email": u.email, "role": m.role} for m, u in members_result.all()]
+    return {"id": team.id, "name": team.name, "credits": team.credits, "members": members}
+
+
+@app.post("/teams/{team_id}/invite")
+async def invite_member(
+    team_id: int, request: Request,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    await _require_team_role(team_id, user.id, ["owner", "admin"], db)
+    body  = await request.json()
+    email = body.get("email", "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="email required")
+    result = await db.execute(select(Team).where(Team.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    token = secrets.token_urlsafe(32)
+    db.add(TeamInvite(
+        team_id    = team_id,
+        email      = email,
+        token      = token,
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(days=7),
+    ))
+    await db.commit()
+    send_team_invite(email, team.name, token)
+    return {"ok": True}
+
+
+@app.post("/teams/accept")
+async def accept_invite(
+    request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    body  = await request.json()
+    token = body.get("token", "")
+    result = await db.execute(select(TeamInvite).where(TeamInvite.token == token))
+    invite = result.scalar_one_or_none()
+    if not invite or invite.accepted or invite.expires_at < datetime.datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Invalid or expired invite")
+    invite.accepted = True
+    db.add(TeamMembership(team_id=invite.team_id, user_id=user.id, role="member"))
+    await db.commit()
+    return {"ok": True, "team_id": invite.team_id}
+
+
+@app.patch("/teams/{team_id}/credits")
+async def add_team_credits(
+    team_id: int, request: Request,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Transfer credits from user pool to team pool."""
+    await _require_team_role(team_id, user.id, ["owner", "admin"], db)
+    body   = await request.json()
+    amount = int(body.get("credits", 0))
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="credits must be positive")
+    if user.credits < amount:
+        raise HTTPException(status_code=400, detail="Insufficient credits")
+    result = await db.execute(select(Team).where(Team.id == team_id))
+    team = result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    user.credits  -= amount
+    team.credits  += amount
+    await db.commit()
+    return {"team_credits": team.credits, "user_credits": user.credits}
+
+
+async def _require_team_member(team_id: int, user_id: int, db: AsyncSession):
+    result = await db.execute(
+        select(TeamMembership).where(TeamMembership.team_id == team_id, TeamMembership.user_id == user_id)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Not a team member")
+
+
+async def _require_team_role(team_id: int, user_id: int, roles: list[str], db: AsyncSession):
+    result = await db.execute(
+        select(TeamMembership).where(TeamMembership.team_id == team_id, TeamMembership.user_id == user_id)
+    )
+    m = result.scalar_one_or_none()
+    if not m or m.role not in roles:
+        raise HTTPException(status_code=403, detail="Insufficient team permissions")
+
+
+# ── Phase 5: Webhooks ─────────────────────────────────────────────────────────
+
+@app.get("/webhooks")
+async def list_webhooks(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(WebhookSubscription).where(WebhookSubscription.user_id == user.id))
+    subs = result.scalars().all()
+    return [{"id": s.id, "url": s.url, "active": s.active, "created_at": s.created_at.isoformat()} for s in subs]
+
+
+@app.post("/webhooks")
+async def create_webhook(
+    request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    body = await request.json()
+    url  = body.get("url", "").strip()
+    if not url or not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="A valid HTTPS URL is required")
+    sub = WebhookSubscription(user_id=user.id, url=url, secret=secrets.token_hex(32))
+    db.add(sub)
+    await db.commit()
+    await db.refresh(sub)
+    return {"id": sub.id, "url": sub.url, "secret": sub.secret}
+
+
+@app.delete("/webhooks/{webhook_id}")
+async def delete_webhook(
+    webhook_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(WebhookSubscription).where(WebhookSubscription.id == webhook_id, WebhookSubscription.user_id == user.id)
+    )
+    sub = result.scalar_one_or_none()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    await db.delete(sub)
+    await db.commit()
+    return {"ok": True}
+
+
+async def _fire_webhooks(user_id: int, payload: dict, db: AsyncSession):
+    """Send signed POST to all active webhooks for a user (background task)."""
+    result = await db.execute(
+        select(WebhookSubscription).where(
+            WebhookSubscription.user_id == user_id,
+            WebhookSubscription.active == True,
+        )
+    )
+    subs = result.scalars().all()
+    body = json.dumps(payload).encode()
+    async with httpx.AsyncClient(timeout=10) as client:
+        for sub in subs:
+            sig = hmac.new(sub.secret.encode(), body, hashlib.sha256).hexdigest()
+            try:
+                await client.post(sub.url, content=body, headers={
+                    "Content-Type": "application/json",
+                    "X-Codgen-Signature": f"sha256={sig}",
+                })
+            except Exception:
+                pass  # best-effort delivery
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
