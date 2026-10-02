@@ -31,11 +31,11 @@ function MediaPickerButton({ accept, label, icon, onUpload, onClear, uploadState
         inputRef.current?.click();
     };
 
-    const handleChange = async (e) => {
+    const handleChange = (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
         e.target.value = '';
-        await onUpload(file);
+        onUpload(file);
     };
 
     const borderClass =
@@ -231,23 +231,21 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
         firstModel?.inputs?.resolution?.default ?? '480p'
     );
 
-    // ── Upload state ────────────────────────────────────────────────────────
+    // ── Upload state (lazy: blob URLs held locally until Generate is clicked) ──
     const [imageState, setImageState] = useState(UPLOAD_STATE.IDLE);
     const [imageName, setImageName] = useState('');
-    const [imageUrl, setImageUrl] = useState(null);
+    const [imageUrl, setImageUrl] = useState(null);       // blob or CDN URL
+    const [pendingImageFile, setPendingImageFile] = useState(null); // raw File
 
     const [videoState, setVideoState] = useState(UPLOAD_STATE.IDLE);
     const [videoName, setVideoName] = useState('');
-    const [videoUrl, setVideoUrl] = useState(null);
+    const [videoUrl, setVideoUrl] = useState(null);       // blob or CDN URL
+    const [pendingVideoFile, setPendingVideoFile] = useState(null); // raw File
 
     const [audioState, setAudioState] = useState(UPLOAD_STATE.IDLE);
     const [audioName, setAudioName] = useState('');
-    const [audioUrl, setAudioUrl] = useState(null);
-
-    // ── Individual progress states ──
-    const [imageProgress, setImageProgress] = useState(0);
-    const [videoProgress, setVideoProgress] = useState(0);
-    const [audioProgress, setAudioProgress] = useState(0);
+    const [audioUrl, setAudioUrl] = useState(null);       // blob or CDN URL
+    const [pendingAudioFile, setPendingAudioFile] = useState(null); // raw File
 
     // ── Prompt ──────────────────────────────────────────────────────────────
     const [prompt, setPrompt] = useState('');
@@ -287,78 +285,44 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
         setSelectedResolution(first.inputs?.resolution?.default ?? '480p');
     }, [inputMode]);
 
-    // ── Upload handlers ─────────────────────────────────────────────────────
-    const handleImageUpload = useCallback(async (file) => {
-        if (file.size > 10 * 1024 * 1024) {
-            alert("Image exceeds 10MB limit.");
-            return;
-        }
-        setImageState(UPLOAD_STATE.UPLOADING);
-        setImageProgress(0);
-        try {
-            const url = await uploadFile(apiKey, file, (pct) => {
-                setImageProgress(pct);
-            });
-            setImageUrl(url);
-            setImageName(file.name);
-            setImageState(UPLOAD_STATE.READY);
-        } catch (err) {
-            setImageState(UPLOAD_STATE.IDLE);
-            alert(`Image upload failed: ${err.message}`);
-        } finally {
-            setImageProgress(0);
-        }
-    }, [apiKey]);
+    // ── Upload handlers (lazy — just store blob URL + File, no network call) ──
+    const handleImageUpload = useCallback((file) => {
+        if (file.size > 10 * 1024 * 1024) { alert('Image exceeds 10MB limit.'); return; }
+        if (imageUrl?.startsWith('blob:')) URL.revokeObjectURL(imageUrl);
+        const blobUrl = URL.createObjectURL(file);
+        setImageUrl(blobUrl);
+        setPendingImageFile(file);
+        setImageName(file.name);
+        setImageState(UPLOAD_STATE.READY);
+    }, [imageUrl]);
 
-    const handleVideoPick = useCallback(async (file) => {
-        if (file.size > 50 * 1024 * 1024) {
-            alert("Video exceeds 50MB limit.");
-            return;
-        }
-        setVideoState(UPLOAD_STATE.UPLOADING);
-        setVideoProgress(0);
-        try {
-            const url = await uploadFile(apiKey, file, (pct) => {
-                setVideoProgress(pct);
-            });
-            setVideoUrl(url);
-            setVideoName(file.name);
-            setVideoState(UPLOAD_STATE.READY);
-        } catch (err) {
-            setVideoState(UPLOAD_STATE.IDLE);
-            alert(`Video upload failed: ${err.message}`);
-        } finally {
-            setVideoProgress(0);
-        }
-    }, [apiKey]);
+    const handleVideoPick = useCallback((file) => {
+        if (file.size > 50 * 1024 * 1024) { alert('Video exceeds 50MB limit.'); return; }
+        if (videoUrl?.startsWith('blob:')) URL.revokeObjectURL(videoUrl);
+        const blobUrl = URL.createObjectURL(file);
+        setVideoUrl(blobUrl);
+        setPendingVideoFile(file);
+        setVideoName(file.name);
+        setVideoState(UPLOAD_STATE.READY);
+    }, [videoUrl]);
 
-    const handleAudioPick = useCallback(async (file) => {
-        if (file.size > 10 * 1024 * 1024) {
-            alert("Audio file exceeds 10MB limit.");
-            return;
-        }
-        setAudioState(UPLOAD_STATE.UPLOADING);
-        setAudioProgress(0);
-        try {
-            const url = await uploadFile(apiKey, file, (pct) => {
-                setAudioProgress(pct);
-            });
-            setAudioUrl(url);
-            setAudioName(file.name);
-            setAudioState(UPLOAD_STATE.READY);
-        } catch (err) {
-            setAudioState(UPLOAD_STATE.IDLE);
-            alert(`Audio upload failed: ${err.message}`);
-        } finally {
-            setAudioProgress(0);
-        }
-    }, [apiKey]);
+    const handleAudioPick = useCallback((file) => {
+        if (file.size > 10 * 1024 * 1024) { alert('Audio file exceeds 10MB limit.'); return; }
+        if (audioUrl?.startsWith('blob:')) URL.revokeObjectURL(audioUrl);
+        const blobUrl = URL.createObjectURL(file);
+        setAudioUrl(blobUrl);
+        setPendingAudioFile(file);
+        setAudioName(file.name);
+        setAudioState(UPLOAD_STATE.READY);
+    }, [audioUrl]);
 
     // ── Mode toggle ─────────────────────────────────────────────────────────
     const switchToImage = () => {
         if (inputMode === 'image') return;
         setInputMode('image');
+        if (videoUrl?.startsWith('blob:')) URL.revokeObjectURL(videoUrl);
         setVideoUrl(null);
+        setPendingVideoFile(null);
         setVideoState(UPLOAD_STATE.IDLE);
         setVideoName('');
     };
@@ -366,7 +330,9 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
     const switchToVideo = () => {
         if (inputMode === 'video') return;
         setInputMode('video');
+        if (imageUrl?.startsWith('blob:')) URL.revokeObjectURL(imageUrl);
         setImageUrl(null);
+        setPendingImageFile(null);
         setImageState(UPLOAD_STATE.IDLE);
         setImageName('');
     };
@@ -412,12 +378,33 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
         setGenerateError(null);
 
         try {
+            // Lazy upload: upload any pending File objects now, right before generation
+            let resolvedImageUrl = imageUrl;
+            let resolvedVideoUrl = videoUrl;
+            let resolvedAudioUrl = audioUrl;
+
+            if (pendingImageFile) {
+                resolvedImageUrl = await uploadFile(apiKey, pendingImageFile);
+                setImageUrl(resolvedImageUrl);
+                setPendingImageFile(null);
+            }
+            if (pendingVideoFile) {
+                resolvedVideoUrl = await uploadFile(apiKey, pendingVideoFile);
+                setVideoUrl(resolvedVideoUrl);
+                setPendingVideoFile(null);
+            }
+            if (pendingAudioFile) {
+                resolvedAudioUrl = await uploadFile(apiKey, pendingAudioFile);
+                setAudioUrl(resolvedAudioUrl);
+                setPendingAudioFile(null);
+            }
+
             const lipsyncParams = {
                 model: selectedModelId,
-                audio_url: audioUrl,
+                audio_url: resolvedAudioUrl,
             };
-            if (inputMode === 'image') lipsyncParams.image_url = imageUrl;
-            else lipsyncParams.video_url = videoUrl;
+            if (inputMode === 'image') lipsyncParams.image_url = resolvedImageUrl;
+            else lipsyncParams.video_url = resolvedVideoUrl;
             if (prompt && selectedModel?.hasPrompt) lipsyncParams.prompt = prompt;
             if (showResolution) lipsyncParams.resolution = selectedResolution;
             if (selectedModel?.hasSeed) lipsyncParams.seed = -1;
@@ -458,9 +445,12 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
         setView('input');
         setActiveResultUrl(null);
         setPrompt('');
-        setImageUrl(null); setImageState(UPLOAD_STATE.IDLE); setImageName('');
-        setVideoUrl(null); setVideoState(UPLOAD_STATE.IDLE); setVideoName('');
-        setAudioUrl(null); setAudioState(UPLOAD_STATE.IDLE); setAudioName('');
+        if (imageUrl?.startsWith('blob:')) URL.revokeObjectURL(imageUrl);
+        setImageUrl(null); setPendingImageFile(null); setImageState(UPLOAD_STATE.IDLE); setImageName('');
+        if (videoUrl?.startsWith('blob:')) URL.revokeObjectURL(videoUrl);
+        setVideoUrl(null); setPendingVideoFile(null); setVideoState(UPLOAD_STATE.IDLE); setVideoName('');
+        if (audioUrl?.startsWith('blob:')) URL.revokeObjectURL(audioUrl);
+        setAudioUrl(null); setPendingAudioFile(null); setAudioState(UPLOAD_STATE.IDLE); setAudioName('');
     };
 
     // ── Media status labels ─────────────────────────────────────────────────
@@ -585,12 +575,14 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
                                         }
                                         onUpload={handleImageUpload}
                                         onClear={() => { 
-                                            setImageUrl(null); 
+                                            if (imageUrl?.startsWith('blob:')) URL.revokeObjectURL(imageUrl);
+                                            setImageUrl(null);
+                                            setPendingImageFile(null);
                                             setImageState(UPLOAD_STATE.IDLE); 
                                             setImageName(''); 
                                         }}
                                         uploadState={imageState}
-                                        progress={imageProgress}
+                                        progress={0}
                                         fileName={imageName}
                                         previewUrl={imageUrl}
                                         isVideo={false}
@@ -606,12 +598,14 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
                                         icon={<VideoIcon />}
                                         onUpload={handleVideoPick}
                                         onClear={() => { 
-                                            setVideoUrl(null); 
+                                            if (videoUrl?.startsWith('blob:')) URL.revokeObjectURL(videoUrl);
+                                            setVideoUrl(null);
+                                            setPendingVideoFile(null);
                                             setVideoState(UPLOAD_STATE.IDLE); 
                                             setVideoName(''); 
                                         }}
                                         uploadState={videoState}
-                                        progress={videoProgress}
+                                        progress={0}
                                         fileName={videoName}
                                         previewUrl={videoUrl}
                                         isVideo={true}
@@ -625,9 +619,15 @@ export default function LipSyncStudio({ apiKey, onGenerationComplete, historyIte
                                     label="Audio"
                                     icon={<MicIcon />}
                                     onUpload={handleAudioPick}
-                                    onClear={() => { setAudioUrl(null); setAudioState(UPLOAD_STATE.IDLE); setAudioName(''); }}
+                                    onClear={() => { 
+                                        if (audioUrl?.startsWith('blob:')) URL.revokeObjectURL(audioUrl);
+                                        setAudioUrl(null);
+                                        setPendingAudioFile(null);
+                                        setAudioState(UPLOAD_STATE.IDLE);
+                                        setAudioName('');
+                                    }}
                                     uploadState={audioState}
-                                    progress={audioProgress}
+                                    progress={0}
                                     fileName={audioName}
                                     previewUrl={null}
                                     isVideo={false}

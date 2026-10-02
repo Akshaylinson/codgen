@@ -192,10 +192,6 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
     const [selectedQuality, setSelectedQuality] = useState(defaultModel.inputs?.quality?.default || '');
     const [selectedMode, setSelectedMode] = useState('');
 
-    // ── upload progress ──
-    const [imageProgress, setImageProgress] = useState(0);
-    const [videoProgress, setVideoProgress] = useState(0);
-
     // ── control visibility ──
     const [showAr, setShowAr] = useState(true);
     const [showDuration, setShowDuration] = useState(true);
@@ -203,11 +199,11 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
     const [showQuality, setShowQuality] = useState(false);
     const [showMode, setShowMode] = useState(false);
 
-    // ── uploads ──
-    const [uploadedImageUrl, setUploadedImageUrl] = useState(null);
-    const [imageUploading, setImageUploading] = useState(false);
-    const [uploadedVideoUrl, setUploadedVideoUrl] = useState(null);
-    const [videoUploading, setVideoUploading] = useState(false);
+    // ── uploads (lazy: blob URLs held locally until Generate is clicked) ──
+    const [uploadedImageUrl, setUploadedImageUrl] = useState(null);   // blob or CDN URL
+    const [pendingImageFile, setPendingImageFile] = useState(null);   // raw File
+    const [uploadedVideoUrl, setUploadedVideoUrl] = useState(null);   // blob or CDN URL
+    const [pendingVideoFile, setPendingVideoFile] = useState(null);   // raw File
     const [uploadedVideoName, setUploadedVideoName] = useState(null);
 
     // ── generation / canvas ──
@@ -322,48 +318,37 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
         el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
     };
 
-    // ── image upload ─────────────────────────────────────────────────────────
-    const handleImageFileChange = async (e) => {
+    // ── image attach (lazy — no upload until Generate) ───────────────────────
+    const handleImageFileChange = (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        if (file.size > 10 * 1024 * 1024) {
-          alert("Image exceeds 10MB limit.");
-          return;
-        }
-        setImageUploading(true);
-        setImageProgress(0);
-        
-        try {
-            const url = await uploadFile(apiKey, file, (pct) => {
-                setImageProgress(pct);
-            });
-            setUploadedImageUrl(url);
+        e.target.value = '';
+        if (file.size > 10 * 1024 * 1024) { alert('Image exceeds 10MB limit.'); return; }
 
-            // Clear v2v if active
-            setUploadedVideoUrl(null);
-            setUploadedVideoName(null);
-            setV2vMode(false);
+        const blobUrl = URL.createObjectURL(file);
+        setUploadedImageUrl(blobUrl);
+        setPendingImageFile(file);
 
-            if (!imageMode) {
-                const firstI2V = i2vModels[0];
-                setImageMode(true);
-                setSelectedModel(firstI2V.id);
-                setSelectedModelName(firstI2V.name);
-                applyControlsForModel(firstI2V.id, true, false);
-            }
-            setPromptDisabled(false);
-        } catch (err) {
-            console.error('[VideoStudio] Image upload failed:', err);
-            alert(`Image upload failed: ${err.message}`);
-        } finally {
-            setImageUploading(false);
-            setImageProgress(0);
-            if (imageFileInputRef.current) imageFileInputRef.current.value = '';
+        // Clear v2v if active
+        setUploadedVideoUrl(null);
+        setPendingVideoFile(null);
+        setUploadedVideoName(null);
+        setV2vMode(false);
+
+        if (!imageMode) {
+            const firstI2V = i2vModels[0];
+            setImageMode(true);
+            setSelectedModel(firstI2V.id);
+            setSelectedModelName(firstI2V.name);
+            applyControlsForModel(firstI2V.id, true, false);
         }
+        setPromptDisabled(false);
     };
 
     const clearImageUpload = () => {
+        if (uploadedImageUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedImageUrl);
         setUploadedImageUrl(null);
+        setPendingImageFile(null);
         setImageMode(false);
         const first = t2vModels[0];
         setSelectedModel(first.id);
@@ -372,47 +357,38 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
         setPromptDisabled(false);
     };
 
-    // ── video upload ─────────────────────────────────────────────────────────
-    const handleVideoFileChange = async (e) => {
+    // ── video attach (lazy — no upload until Generate) ───────────────────────
+    const handleVideoFileChange = (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        if (file.size > 50 * 1024 * 1024) {
-          alert("Video exceeds 50MB limit.");
-          return;
-        }
-        setVideoUploading(true);
-        setVideoProgress(0);
-        try {
-            const url = await uploadFile(apiKey, file, (pct) => {
-                setVideoProgress(pct);
-            });
-            setUploadedVideoUrl(url);
-            setUploadedVideoName(file.name);
+        e.target.value = '';
+        if (file.size > 50 * 1024 * 1024) { alert('Video exceeds 50MB limit.'); return; }
 
-            // Clear image mode if active
-            if (imageMode) {
-                setUploadedImageUrl(null);
-                setImageMode(false);
-            }
-            setV2vMode(true);
-            const firstV2V = v2vModels[0];
-            setSelectedModel(firstV2V.id);
-            setSelectedModelName(firstV2V.name);
-            applyControlsForModel(firstV2V.id, false, true);
-            setPrompt('');
-            setPromptDisabled(true);
-        } catch (err) {
-            console.error('[VideoStudio] Video upload failed:', err);
-            alert(`Video upload failed: ${err.message}`);
-        } finally {
-            setVideoUploading(false);
-            setVideoProgress(0);
-            if (videoFileInputRef.current) videoFileInputRef.current.value = '';
+        const blobUrl = URL.createObjectURL(file);
+        setUploadedVideoUrl(blobUrl);
+        setPendingVideoFile(file);
+        setUploadedVideoName(file.name);
+
+        // Clear image mode if active
+        if (imageMode) {
+            if (uploadedImageUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedImageUrl);
+            setUploadedImageUrl(null);
+            setPendingImageFile(null);
+            setImageMode(false);
         }
+        setV2vMode(true);
+        const firstV2V = v2vModels[0];
+        setSelectedModel(firstV2V.id);
+        setSelectedModelName(firstV2V.name);
+        applyControlsForModel(firstV2V.id, false, true);
+        setPrompt('');
+        setPromptDisabled(true);
     };
 
     const clearVideoUpload = () => {
+        if (uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedVideoUrl);
         setUploadedVideoUrl(null);
+        setPendingVideoFile(null);
         setUploadedVideoName(null);
         setV2vMode(false);
         const first = t2vModels[0];
@@ -427,8 +403,9 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
         if (isV2V) {
             setV2vMode(true);
             setImageMode(false);
+            if (uploadedImageUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedImageUrl);
             setUploadedImageUrl(null);
-            setUploadedImagePreview(null);
+            setPendingImageFile(null);
             setSelectedModel(m.id);
             setSelectedModelName(m.name);
             applyControlsForModel(m.id, false, true);
@@ -436,8 +413,10 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
             setPromptDisabled(true);
         } else {
             if (v2vMode) {
+                if (uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedVideoUrl);
                 setV2vMode(false);
                 setUploadedVideoUrl(null);
+                setPendingVideoFile(null);
                 setUploadedVideoName(null);
                 setPromptDisabled(false);
             }
@@ -445,7 +424,7 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
             setSelectedModelName(m.name);
             applyControlsForModel(m.id, imageMode, false);
         }
-    }, [v2vMode, imageMode, applyControlsForModel]);
+    }, [v2vMode, imageMode, uploadedImageUrl, uploadedVideoUrl, applyControlsForModel]);
 
     // ── add to local history ──────────────────────────────────────────────────
     const addToLocalHistory = useCallback((entry) => {
@@ -482,13 +461,27 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
         let hadError = false;
 
         try {
+            // Lazy upload: upload pending files now, right before generation
+            let resolvedImageUrl = uploadedImageUrl;
+            let resolvedVideoUrl = uploadedVideoUrl;
+
+            if (pendingImageFile) {
+                resolvedImageUrl = await uploadFile(apiKey, pendingImageFile);
+                setUploadedImageUrl(resolvedImageUrl);
+                setPendingImageFile(null);
+            }
+            if (pendingVideoFile) {
+                resolvedVideoUrl = await uploadFile(apiKey, pendingVideoFile);
+                setUploadedVideoUrl(resolvedVideoUrl);
+                setPendingVideoFile(null);
+            }
+
             let res;
 
             if (v2vMode) {
-                // V2V: use generateVideo with video_url (the v2v models use the video endpoint)
                 res = await generateVideo(apiKey, {
                     model: selectedModel,
-                    video_url: uploadedVideoUrl,
+                    video_url: resolvedVideoUrl,
                 });
                 if (!res?.url) throw new Error('No video URL returned by API');
 
@@ -501,7 +494,7 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
                 if (onGenerationComplete) onGenerationComplete({ url: res.url, model: selectedModel, prompt: '', type: 'video' });
 
             } else if (imageMode) {
-                const i2vParams = { model: selectedModel, image_url: uploadedImageUrl };
+                const i2vParams = { model: selectedModel, image_url: resolvedImageUrl };
                 if (trimmedPrompt) i2vParams.prompt = trimmedPrompt;
                 i2vParams.aspect_ratio = selectedAr;
                 const durations = getDurationsForI2VModel(selectedModel);
@@ -571,7 +564,8 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
         }
     }, [
         apiKey, prompt, v2vMode, imageMode, selectedModel, selectedAr, selectedDuration,
-        selectedResolution, selectedQuality, selectedMode, uploadedImageUrl, uploadedVideoUrl,
+        selectedResolution, selectedQuality, selectedMode,
+        uploadedImageUrl, uploadedVideoUrl, pendingImageFile, pendingVideoFile,
         lastGenerationId, getCurrentModel, addToLocalHistory, showVideoInCanvas, onGenerationComplete,
     ]);
 
@@ -583,10 +577,13 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
     const handleNewPrompt = useCallback(() => {
         resetToPromptBar();
         setPrompt('');
+        if (uploadedImageUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedImageUrl);
         setUploadedImageUrl(null);
-        setUploadedImagePreview(null);
+        setPendingImageFile(null);
         setImageMode(false);
+        if (uploadedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedVideoUrl);
         setUploadedVideoUrl(null);
+        setPendingVideoFile(null);
         setUploadedVideoName(null);
         setV2vMode(false);
         const first = t2vModels[0];
@@ -595,21 +592,22 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
         applyControlsForModel(first.id, false, false);
         setPromptDisabled(false);
         setTimeout(() => textareaRef.current?.focus(), 50);
-    }, [resetToPromptBar, applyControlsForModel]);
+    }, [resetToPromptBar, uploadedImageUrl, uploadedVideoUrl, applyControlsForModel]);
 
     const handleExtend = useCallback(() => {
         if (!lastGenerationId) return;
         resetToPromptBar();
         setPrompt('');
+        if (uploadedImageUrl?.startsWith('blob:')) URL.revokeObjectURL(uploadedImageUrl);
         setUploadedImageUrl(null);
-        setUploadedImagePreview(null);
+        setPendingImageFile(null);
         setImageMode(false);
         setSelectedModel('seedance-v2.0-extend');
         setSelectedModelName('Seedance 2.0 Extend');
         applyControlsForModel('seedance-v2.0-extend', false, false);
         setPromptDisabled(false);
         setTimeout(() => textareaRef.current?.focus(), 50);
-    }, [lastGenerationId, resetToPromptBar, applyControlsForModel]);
+    }, [lastGenerationId, resetToPromptBar, uploadedImageUrl, applyControlsForModel]);
 
     // ── derived UI values ────────────────────────────────────────────────────
     const isSeedance2Canvas = canvasModel === 'seedance-v2.0-t2v' || canvasModel === 'seedance-v2.0-i2v';
@@ -779,16 +777,9 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
                                         onClick={() => uploadedImageUrl ? clearImageUpload() : imageFileInputRef.current?.click()}
                                         className={`w-10 h-10 shrink-0 rounded-xl border transition-all flex items-center justify-center relative overflow-hidden ${uploadedImageUrl ? 'border-primary/60 bg-primary/10' : 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-primary/40'} group`}
                                     >
-                                        {imageUploading ? (
-                                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-10">
-                                                <div className="w-4 h-4 rounded-full border border-primary/30 border-t-primary animate-spin mb-0.5" />
-                                                <span className="text-[8px] font-black text-primary">{imageProgress}%</span>
-                                            </div>
-                                        ) : null}
-                                        
                                         {uploadedImageUrl ? (
-                                            <img src={uploadedImageUrl} alt="" className={`w-full h-full object-cover rounded-xl ${imageUploading ? 'opacity-40 blur-[2px]' : 'opacity-100'}`} />
-                                        ) : !imageUploading && (
+                                            <img src={uploadedImageUrl} alt="" className="w-full h-full object-cover rounded-xl" />
+                                        ) : (
                                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-muted group-hover:text-primary transition-colors">
                                                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
                                                 <circle cx="8.5" cy="8.5" r="1.5" />
@@ -813,13 +804,8 @@ export default function VideoStudio({ apiKey, onGenerationComplete, historyItems
                                         onClick={() => uploadedVideoUrl ? clearVideoUpload() : videoFileInputRef.current?.click()}
                                         className={`w-10 h-10 shrink-0 rounded-xl border transition-all flex items-center justify-center relative overflow-hidden ${uploadedVideoUrl ? 'border-primary/60 bg-white/5' : 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-primary/40'} group`}
                                     >
-                                        {videoUploading ? (
-                                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-10">
-                                                <div className="w-4 h-4 rounded-full border border-primary/30 border-t-primary animate-spin mb-0.5" />
-                                                <span className="text-[8px] font-black text-primary">{videoProgress}%</span>
-                                            </div>
-                                        ) : uploadedVideoUrl ? (
-                                            <video src={uploadedVideoUrl} className={`w-full h-full object-cover rounded-xl ${videoUploading ? 'opacity-40 blur-[2px]' : 'opacity-100'}`} muted />
+                                        {uploadedVideoUrl ? (
+                                            <video src={uploadedVideoUrl} className="w-full h-full object-cover rounded-xl" muted />
                                         ) : (
                                             <VideoIconSvg className="text-muted group-hover:text-primary transition-colors" />
                                         )}
