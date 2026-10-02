@@ -141,6 +141,22 @@ export async function processLipSync(apiKey, params) {
     return submitAndPoll(endpoint, payload, token, params.onRequestId, 900);
 }
 
+function _saveUploadToLocalStorage(fileUrl, file) {
+    try {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const history = JSON.parse(localStorage.getItem('codgen_upload_history') || '[]');
+            // avoid duplicates
+            if (!history.find(h => h.url === fileUrl)) {
+                history.unshift({ url: fileUrl, thumbnail: e.target.result, name: file.name, ts: Date.now() });
+                // keep last 50 uploads
+                localStorage.setItem('codgen_upload_history', JSON.stringify(history.slice(0, 50)));
+            }
+        };
+        reader.readAsDataURL(file);
+    } catch (_) {}
+}
+
 export function uploadFile(apiKey, file, onProgress) {
     return new Promise((resolve, reject) => {
         const token = getToken() || apiKey;
@@ -165,14 +181,19 @@ export function uploadFile(apiKey, file, onProgress) {
                 try {
                     const data = JSON.parse(xhr.responseText);
                     const fileUrl = data.url || data.file_url || data.data?.url;
-                    if (!fileUrl) reject(new Error('No URL returned from file upload'));
-                    else resolve(fileUrl);
+                    if (!fileUrl) { reject(new Error('No URL returned from file upload')); return; }
+                    // Save URL + thumbnail to localStorage — no S3 needed for display/history
+                    _saveUploadToLocalStorage(fileUrl, file);
+                    resolve(fileUrl);
                 } catch (e) {
                     reject(new Error('Failed to parse upload response'));
                 }
             } else {
                 let detail = xhr.statusText;
-                try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) {}
+                try {
+                    const err = JSON.parse(xhr.responseText);
+                    detail = err.detail || err.error || err.message || JSON.stringify(err);
+                } catch (e) {}
                 reject(new Error(`File upload failed: ${xhr.status} - ${detail}`));
             }
         };

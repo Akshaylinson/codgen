@@ -27,8 +27,14 @@ def _get_client():
     return _s3
 
 
+_PLACEHOLDERS = {"your-bucket-name", "your_access_key", "your_secret_key", "", None}
+
 def storage_enabled() -> bool:
-    return bool(S3_BUCKET and S3_ACCESS_KEY and S3_SECRET_KEY)
+    return (
+        S3_BUCKET not in _PLACEHOLDERS and
+        S3_ACCESS_KEY not in _PLACEHOLDERS and
+        S3_SECRET_KEY not in _PLACEHOLDERS
+    )
 
 
 async def upload_to_storage(file_bytes: bytes, filename: str, content_type: str) -> str:

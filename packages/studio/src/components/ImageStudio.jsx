@@ -38,10 +38,8 @@ async function downloadImage(url, filename) {
 
 function UploadButton({ apiKey, maxImages, onSelect, onClear }) {
   const [panelOpen, setPanelOpen] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [selectedEntries, setSelectedEntries] = useState([]); // [{url, thumbnail}]
-  const [uploadHistory, setUploadHistory] = useState([]); // [{id, name, url, thumbnail}]
-  const [lastUploadProgress, setLastUploadProgress] = useState(0);
+  const [selectedEntries, setSelectedEntries] = useState([]); // [{url, file?, isLocal?}]
+  const [uploadHistory, setUploadHistory] = useState([]); // [{id, name, url, file?, isLocal?}]
   const fileInputRef = useRef(null);
   const panelRef = useRef(null);
   const triggerRef = useRef(null);
@@ -79,12 +77,13 @@ function UploadButton({ apiKey, maxImages, onSelect, onClear }) {
     (entries) => {
       if (!entries.length) return;
       const urls = entries.map((e) => e.url);
-      onSelect({ url: urls[0], urls, thumbnail: entries[0].url });
+      const files = entries.map((e) => e.file || null);
+      onSelect({ url: urls[0], urls, files, thumbnail: entries[0].url });
     },
     [onSelect]
   );
 
-  const handleFileChange = async (e) => {
+  const handleFileChange = (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
     e.target.value = "";
@@ -96,60 +95,27 @@ function UploadButton({ apiKey, maxImages, onSelect, onClear }) {
       return;
     }
 
-    setUploading(true);
-    try {
-      const toUpload =
-        maxImages === 1 ? files.slice(0, 1) : files.slice(0, maxImages - selectedEntries.length || 1);
+    const toAdd = maxImages === 1 ? files.slice(0, 1) : files.slice(0, maxImages - selectedEntries.length || 1);
 
-      await Promise.all(
-        toUpload.map(async (file) => {
-          const id = Date.now().toString() + Math.random();
+    toAdd.forEach((file) => {
+      const id = Date.now().toString() + Math.random();
+      // Create a local blob URL for preview — no upload happens here
+      const localUrl = URL.createObjectURL(file);
+      const entry = { id, name: file.name, url: localUrl, file, isLocal: true };
+      setUploadHistory((prev) => [entry, ...prev]);
 
-          // Add a placeholder to history immediately without local preview
-          const placeholder = { id, name: file.name, url: null, progress: 0 };
-          setUploadHistory((prev) => [placeholder, ...prev]);
-
-          try {
-            const uploadedUrl = await uploadFile(apiKey, file, (pct) => {
-              setLastUploadProgress(pct);
-              setUploadHistory((prev) =>
-                prev.map((h) => (h.id === id ? { ...h, progress: pct } : h))
-              );
-            });
-
-            // Update history with real URL and Mark as 100%
-            setUploadHistory((prev) =>
-              prev.map((h) => {
-                if (h.id === id) {
-                  return { ...h, url: uploadedUrl, progress: 100 };
-                }
-                return h;
-              })
-            );
-
-            // Auto-select if there's room
-            if (selectedEntries.length < maxImages) {
-              const newEntry = { url: uploadedUrl };
-              setSelectedEntries((prev) => [...prev, newEntry]);
-
-              if (maxImages === 1) {
-                fireOnSelect([newEntry]);
-                setPanelOpen(false);
-              }
-            }
-          } catch (err) {
-            console.error("[UploadButton] Upload failed for", file.name, err);
-            setUploadHistory((prev) => prev.filter((h) => h.id !== id));
-            throw err;
+      if (selectedEntries.length < maxImages) {
+        const newEntry = { url: localUrl, file, isLocal: true };
+        setSelectedEntries((prev) => {
+          const next = [...prev, newEntry];
+          if (maxImages === 1) {
+            fireOnSelect([newEntry]);
+            setPanelOpen(false);
           }
-        })
-      );
-    } catch (err) {
-      alert(`Image upload failed: ${err.message}`);
-    } finally {
-      setUploading(false);
-      setLastUploadProgress(0);
-    }
+          return next;
+        });
+      }
+    });
   };
 
   const handleCellClick = (entry) => {
@@ -205,20 +171,12 @@ function UploadButton({ apiKey, maxImages, onSelect, onClear }) {
   const count = selectedEntries.length;
   const hasSelection = count > 0;
 
-  // Trigger icon content
   let triggerContent;
-  if (hasSelection || uploading) {
-    const mainEntry = selectedEntries[0] || uploadHistory[0];
+  if (hasSelection) {
+    const mainEntry = selectedEntries[0];
     const canAddMore = isMulti && count < maxImages;
     let badge;
-    if (uploading && !hasSelection) {
-      badge = (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-10">
-          <div className="w-4 h-4 rounded-full border border-primary/30 border-t-primary animate-spin mb-0.5" />
-          <span className="text-[8px] font-black text-primary">{lastUploadProgress}%</span>
-        </div>
-      );
-    } else if (count > 1) {
+    if (count > 1) {
       badge = (
         <div className="absolute bottom-0.5 right-0.5 min-w-[16px] h-4 bg-primary rounded-full flex items-center justify-center px-0.5">
           <span className="text-[9px] font-black text-black leading-none">{count}</span>
@@ -241,21 +199,8 @@ function UploadButton({ apiKey, maxImages, onSelect, onClear }) {
     }
     triggerContent = (
       <>
-        {uploading && hasSelection && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-10">
-            <div className="w-4 h-4 rounded-full border border-primary/30 border-t-primary animate-spin mb-0.5" />
-            <span className="text-[8px] font-black text-primary">{lastUploadProgress}%</span>
-          </div>
-        )}
-        {mainEntry?.url ? (
-          <img src={mainEntry.url} alt="" className={`w-full h-full object-cover transition-all duration-300 ${uploading && hasSelection ? 'blur-[2px] scale-110 opacity-60' : 'blur-0 scale-100 opacity-100'}`} />
-        ) : (
-           <div className="w-full h-full flex flex-col items-center justify-center bg-white/5 animate-pulse">
-             <div className="w-4 h-4 rounded-full border border-primary/20 border-t-primary animate-spin mb-0.5" />
-             <span className="text-[8px] font-black text-primary">{lastUploadProgress}%</span>
-           </div>
-        )}
-        {!uploading && badge}
+        <img src={mainEntry.url} alt="" className="w-full h-full object-cover" />
+        {badge}
       </>
     );
   } else {
@@ -400,23 +345,16 @@ function UploadButton({ apiKey, maxImages, onSelect, onClear }) {
                   <div
                     key={entry.id}
                     title={entry.name}
-                    onClick={() => entry.url && handleCellClick(entry)}
+                    onClick={() => handleCellClick(entry)}
                     className={`relative rounded-xl overflow-hidden border-2 cursor-pointer group/cell aspect-square transition-all ${
                       isSelected ? "border-primary shadow-glow" : "border-white/10 hover:border-white/30"
-                    } ${atMax ? "opacity-40 cursor-not-allowed" : ""} ${!entry.url ? "cursor-wait" : ""}`}
+                    } ${atMax ? "opacity-40 cursor-not-allowed" : ""}`}
                   >
-                    {entry.url ? (
-                      <img
-                        src={entry.url}
-                        alt={entry.name}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full bg-white/5 flex flex-col items-center justify-center">
-                         <div className="w-8 h-8 rounded-full border-2 border-primary/30 border-t-primary animate-spin mb-1" />
-                         <span className="text-[10px] font-black text-primary">{entry.progress}%</span>
-                      </div>
-                    )}
+                    <img
+                      src={entry.url}
+                      alt={entry.name}
+                      className="w-full h-full object-cover"
+                    />
 
                     {/* Hover overlay with delete */}
                     {entry.url && (
@@ -608,6 +546,7 @@ export default function ImageStudio({ apiKey, onGenerationComplete, historyItems
   // ── Prompt / upload state ───────────────────────────────────────────────
   const [prompt, setPrompt] = useState("");
   const [uploadedImageUrls, setUploadedImageUrls] = useState([]);
+  const [pendingFiles, setPendingFiles] = useState([]); // File objects waiting to be uploaded at generate time
 
   // ── UI state ────────────────────────────────────────────────────────────
   const [dropdownOpen, setDropdownOpen] = useState(null); // 'model' | 'ar' | 'quality' | null
@@ -663,9 +602,10 @@ export default function ImageStudio({ apiKey, onGenerationComplete, historyItems
 
   // ── Upload picker callbacks ──────────────────────────────────────────────
   const handleUploadSelect = useCallback(
-    ({ url, urls }) => {
+    ({ url, urls, files }) => {
       const newUrls = urls || [url];
-      setUploadedImageUrls(newUrls);
+      setUploadedImageUrls(newUrls);          // blob URLs for display
+      setPendingFiles(files || []);           // raw File objects for lazy upload
 
       if (!imageMode) {
         const firstI2I = i2iModels[0];
@@ -684,6 +624,7 @@ export default function ImageStudio({ apiKey, onGenerationComplete, historyItems
 
   const handleUploadClear = useCallback(() => {
     setUploadedImageUrls([]);
+    setPendingFiles([]);
     setImageMode(false);
     const firstT2I = t2iModels[0];
     const ars = getAspectRatiosForModel(firstT2I.id);
@@ -729,6 +670,7 @@ export default function ImageStudio({ apiKey, onGenerationComplete, historyItems
     setCurrentImageUrl(null);
     setPrompt("");
     setUploadedImageUrls([]);
+    setPendingFiles([]);
     setImageMode(false);
     const firstT2I = t2iModels[0];
     const ars = getAspectRatiosForModel(firstT2I.id);
@@ -760,12 +702,23 @@ export default function ImageStudio({ apiKey, onGenerationComplete, historyItems
     setGenerateError(null);
 
     try {
+      // Lazy upload: if we have pending File objects, upload them now and swap blob URLs for CDN URLs
+      let resolvedUrls = uploadedImageUrls;
+      if (pendingFiles.length > 0) {
+        resolvedUrls = await Promise.all(
+          pendingFiles.map((file) => file ? uploadFile(apiKey, file) : null)
+        );
+        resolvedUrls = resolvedUrls.filter(Boolean);
+        setUploadedImageUrls(resolvedUrls);
+        setPendingFiles([]);
+      }
+
       let res;
       if (imageMode) {
         const genParams = {
           model: selectedModelId,
-          images_list: uploadedImageUrls,
-          image_url: uploadedImageUrls[0],
+          images_list: resolvedUrls,
+          image_url: resolvedUrls[0],
           aspect_ratio: selectedAr,
         };
         if (prompt.trim()) genParams.prompt = prompt.trim();

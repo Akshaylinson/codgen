@@ -483,48 +483,50 @@ async def proxy_post(
     user:             User = Depends(get_current_user),
     db:               AsyncSession = Depends(get_db),
 ):
-    if user.credits <= 0:
-        raise HTTPException(status_code=429, detail="Credit quota exhausted. Top up to continue.")
-
-    if REQUIRE_EMAIL_VERIFICATION and not user.is_verified:
-        raise HTTPException(status_code=403, detail="Please verify your email before generating.")
-
     content_type = request.headers.get("content-type", "")
     upstream_url = f"{MUAPI_BASE}/api/v1/{endpoint}"
-    body_json    = {}
+
+    # File uploads bypass credit/verification checks — they don't generate content
+    is_upload = "multipart/form-data" in content_type
+
+    if not is_upload:
+        if user.credits <= 0:
+            raise HTTPException(status_code=429, detail="Credit quota exhausted. Top up to continue.")
+        if REQUIRE_EMAIL_VERIFICATION and not user.is_verified:
+            raise HTTPException(status_code=403, detail="Please verify your email before generating.")
 
     async with httpx.AsyncClient(timeout=300) as client:
-        if "multipart/form-data" in content_type:
+        if is_upload:
             form = await request.form()
             files, data = {}, {}
             for key, value in form.items():
                 if hasattr(value, "read"):
                     file_bytes = await value.read()
-                    if storage_enabled():
-                        cdn_url = await upload_to_storage(
-                            file_bytes,
-                            value.filename,
-                            value.content_type or "application/octet-stream",
-                        )
-                        if cdn_url:
-                            return JSONResponse({"url": cdn_url})
                     files[key] = (value.filename, file_bytes, value.content_type)
                 else:
                     data[key] = value
             resp = await client.post(
                 upstream_url, headers={"x-api-key": MUAPI_KEY}, files=files, data=data
             )
-        else:
-            body_bytes = await request.body()
-            try:
-                body_json = json.loads(body_bytes)
-            except Exception:
-                body_json = {}
-            resp = await client.post(
-                upstream_url,
-                headers={"Content-Type": "application/json", "x-api-key": MUAPI_KEY},
-                content=body_bytes,
-            )
+            if resp.status_code >= 400:
+                try:
+                    err = resp.json()
+                    detail = err.get("error") or err.get("detail") or err.get("message") or str(err)
+                except Exception:
+                    detail = resp.text
+                raise HTTPException(status_code=resp.status_code, detail=f"Muapi upload error: {detail}")
+            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+        body_bytes = await request.body()
+        try:
+            body_json = json.loads(body_bytes)
+        except Exception:
+            pass
+        resp = await client.post(
+            upstream_url,
+            headers={"Content-Type": "application/json", "x-api-key": MUAPI_KEY},
+            content=body_bytes,
+        )
 
     resp_data = resp.json()
 
