@@ -57,3 +57,14 @@ if (localStorage.getItem('codgen_token')) {
   AuthModal(boot);
 }
 
+// Handle session expiry from anywhere in the app
+window.addEventListener('unhandledrejection', (e) => {
+  if (e.reason?.message === 'SESSION_EXPIRED') {
+    localStorage.removeItem('codgen_token');
+    localStorage.removeItem('codgen_refresh');
+    localStorage.removeItem('codgen_email');
+    document.body.innerHTML = '';
+    AuthModal(boot);
+  }
+});
+

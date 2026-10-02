@@ -16,6 +16,30 @@ export class CodgenClient {
         return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.getToken()}` };
     }
 
+    async refreshAccessToken() {
+        const refresh = localStorage.getItem('codgen_refresh');
+        if (!refresh) throw new Error('SESSION_EXPIRED');
+        const res = await fetch(`${this.baseUrl}/auth/refresh`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: refresh }),
+        });
+        if (!res.ok) throw new Error('SESSION_EXPIRED');
+        const data = await res.json();
+        localStorage.setItem('codgen_token',  data.access_token);
+        localStorage.setItem('codgen_refresh', data.refresh_token);
+        return data.access_token;
+    }
+
+    async fetchWithRefresh(url, options = {}) {
+        let res = await fetch(url, { ...options, headers: { ...options.headers, ...this.authHeaders() } });
+        if (res.status === 401) {
+            await this.refreshAccessToken();
+            res = await fetch(url, { ...options, headers: { ...options.headers, ...this.authHeaders() } });
+        }
+        return res;
+    }
+
     /**
      * Generates an image (Text-to-Image or Image-to-Image)
      * @param {Object} params
@@ -72,7 +96,7 @@ export class CodgenClient {
         console.log('[Codgen] Payload:', finalPayload);
 
         try {
-            const response = await fetch(url, {
+            const response = await this.fetchWithRefresh(url, {
                 method: 'POST',
                 headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
@@ -112,7 +136,7 @@ export class CodgenClient {
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             await new Promise(resolve => setTimeout(resolve, interval));
             try {
-                const response = await fetch(pollUrl, { headers: this.authHeaders() });
+                const response = await this.fetchWithRefresh(pollUrl, { headers: {} });
 
                 if (!response.ok) {
                     const errText = await response.text();
@@ -154,7 +178,7 @@ export class CodgenClient {
         console.log('[Codgen] Video Payload:', finalPayload);
 
         try {
-            const response = await fetch(url, {
+            const response = await this.fetchWithRefresh(url, {
                 method: 'POST',
                 headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
@@ -220,7 +244,7 @@ export class CodgenClient {
         console.log('[Codgen] I2I Payload:', finalPayload);
 
         try {
-            const response = await fetch(url, {
+            const response = await this.fetchWithRefresh(url, {
                 method: 'POST',
                 headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
@@ -286,7 +310,7 @@ export class CodgenClient {
         console.log('[Codgen] I2V Payload:', finalPayload);
 
         try {
-            const response = await fetch(url, {
+            const response = await this.fetchWithRefresh(url, {
                 method: 'POST',
                 headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
@@ -322,7 +346,7 @@ export class CodgenClient {
         const formData = new FormData();
         formData.append('file', file);
 
-        const response = await fetch(url, {
+        const response = await this.fetchWithRefresh(url, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${this.getToken()}` },
             body: formData
@@ -357,7 +381,7 @@ export class CodgenClient {
         console.log('[Codgen] V2V Payload:', finalPayload);
 
         try {
-            const response = await fetch(url, {
+            const response = await this.fetchWithRefresh(url, {
                 method: 'POST',
                 headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
@@ -414,7 +438,7 @@ export class CodgenClient {
         console.log('[Codgen] LipSync Payload:', finalPayload);
 
         try {
-            const response = await fetch(url, {
+            const response = await this.fetchWithRefresh(url, {
                 method: 'POST',
                 headers: this.authHeaders(),
                 body: JSON.stringify(finalPayload)
