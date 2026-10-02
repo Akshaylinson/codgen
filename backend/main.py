@@ -42,7 +42,7 @@ from auth import (
     refresh_token_expiry,
     decode_access_token,
 )
-from email import send_password_reset, send_verification_email, send_team_invite
+from mailer import send_password_reset, send_verification_email, send_team_invite
 
 load_dotenv()
 

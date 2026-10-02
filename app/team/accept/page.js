@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 
 const BACKEND   = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 const TOKEN_KEY = 'codgen_token';
 
-export default function AcceptInvitePage() {
+function AcceptInviteContent() {
   const params = useSearchParams();
   const router = useRouter();
   const [status, setStatus] = useState('idle'); // idle | loading | success | error | no_auth
@@ -55,5 +55,13 @@ export default function AcceptInvitePage() {
         {status === 'error' && <p className="text-red-400">{msg || 'Invalid or expired invite.'}</p>}
       </div>
     </div>
+  );
+}
+
+export default function AcceptInvitePage() {
+  return (
+    <Suspense fallback={null}>
+      <AcceptInviteContent />
+    </Suspense>
   );
 }
